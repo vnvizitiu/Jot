@@ -3,11 +3,19 @@
 namespace Jot.Storage
 {
     /// <summary>
-    /// Base class for objects that serialize and persist data. Keeps all data in a dictionary, and loads/saves the dictionary when neccessary.
+    /// Base class for objects that serialize and persist data. Keeps all data in a dictionary, and loads/saves the dictionary when necessary.
     /// </summary>
     public abstract class PersistentStoreBase : IStore
     {
         Dictionary<string, object> _values;
+
+        private Dictionary<string, object> Values
+        {
+            get
+            {
+                return _values ?? (_values = LoadValues());
+            }
+        }
 
         /// <summary>
         /// Indicates if the store contains data for the specified key.
@@ -16,7 +24,7 @@ namespace Jot.Storage
         /// <returns>True if the store contains data for the specified key, otherwise False.</returns>
         public bool ContainsKey(string identifier)
         {
-            return _values.ContainsKey(identifier);
+            return Values.ContainsKey(identifier);
         }
         /// <summary>
         /// Stores a value for the specified key.
@@ -25,7 +33,7 @@ namespace Jot.Storage
         /// <param name="key">The key that identifies the stored value, i.e. the name of the property whose value is stored.</param>
         public void Set(object value, string key)
         {
-            _values[key] = value;
+            Values[key] = value;
         }
         /// <summary>
         /// Gets the value stored under the specified key.
@@ -34,24 +42,18 @@ namespace Jot.Storage
         /// <returns>The value stored under the specified key</returns>
         public object Get(string key)
         {
-            return _values[key];
+            return Values[key];
         }
-        /// <summary>
-        /// Initializes the data store. For a file-based store, this is where data from the file should be loaded.
-        /// </summary>
-        public void Initialize()
-        {
-            _values = LoadValues();
-        }
+        
         /// <summary>
         /// Commits the new data to the store. For a file-based store, this is where data should be written to the file.
         /// </summary>
         public void CommitChanges()
         {
-            SaveValues(_values);
+            SaveValues(Values);
         }
         /// <summary>
-        /// Loads values from the backig storage into a dictionary.
+        /// Loads values from the backing storage into a dictionary.
         /// </summary>
         /// <returns>A dictionary with the retrieved values.</returns>
         protected abstract Dictionary<string, object> LoadValues();

@@ -35,12 +35,17 @@ namespace Jot
 
         /// <summary>
         /// The identity of the target. This severs to identify which stored data belongs to which object. If not specified,
-        /// only the type name is used, which is fine for singletons.
+        /// only the type name is used, which is fine for singletons. (check out NamingScheme)
         /// </summary>
         public string Key { get; set; }
 
         /// <summary>
-        /// A dictioanary containing the tracked properties.
+        /// Defines format of store name. Default value is TypeNameAndKey. In that case the storename is "{typename}_{key}".
+        /// </summary>
+        public NamingScheme StoreNamingScheme { get; set; } = NamingScheme.TypeNameAndKey;
+
+        /// <summary>
+        /// A dictionary containing the tracked properties.
         /// </summary>
         public Dictionary<string, TrackedPropertyInfo> TrackedProperties { get; set; } = new Dictionary<string, TrackedPropertyInfo>();
 
@@ -56,21 +61,20 @@ namespace Jot
         /// Allows the handler to cancel applying the data to the property, as well as to modify the data that gets applied.
         /// </summary>
         public event EventHandler<TrackingOperationEventArgs> ApplyingProperty;
-        private object OnApplyingState(string property, object value)
+        private bool OnApplyingState(string property, ref object value)
         {
             var handler = ApplyingProperty;
             if (handler != null)
             {
                 TrackingOperationEventArgs args = new TrackingOperationEventArgs(this, property, value);
                 handler(this, args);
-
-                if (args.Cancel)
-                    throw new OperationCanceledException();
-
-                return args.Value;
+                value = args.Value;
+                return !args.Cancel;
             }
             else
-                return value;
+            {
+                return true;
+            }
         }
 
         /// <summary>
@@ -86,23 +90,24 @@ namespace Jot
         /// Fired when the a property of the object is being persisted. Allows the handler to cancel persisting the property, as well as to modify the data that gets persisted.
         /// </summary>
         public event EventHandler<TrackingOperationEventArgs> PersistingProperty;
-        private object OnPersistingState(string property, object value)
+        private bool OnPersistingState(string property, ref object value)
         {
             var handler = PersistingProperty;
             if (handler != null)
             {
                 TrackingOperationEventArgs args = new TrackingOperationEventArgs(this, property, value);
                 handler(this, args);
-                if (args.Cancel)
-                    throw new OperationCanceledException();
-                else
-                    return args.Value;
+                value = args.Value;
+                return !args.Cancel;
             }
-            return value;
+            else
+            {
+                return true;
+            }
         }
 
         /// <summary>
-        /// Fired when the data for the target object is peristed.
+        /// Fired when the data for the target object is persisted.
         /// </summary>
         public event EventHandler StatePersisted;
         private void OnStatePersisted()
@@ -112,7 +117,7 @@ namespace Jot
         #endregion
 
         internal TrackingConfiguration(object target, StateTracker tracker)
-            :this(target, null, tracker)
+            : this(target, null, tracker)
         {
         }
 
@@ -124,37 +129,29 @@ namespace Jot
         }
 
         /// <summary>
-        /// Initialize is called by StateTracker after the configuration object has been prepared (properties added, triggers set etc...).
-        /// </summary>
-        internal void CompleteInitialization()
-        {
-            object target = TargetReference.Target;
-
-            //use the object type plus the key to identify the object store
-            string storeName = Key == null ? target.GetType().Name : string.Format("{0}_{1}", target.GetType().Name, Key);
-            TargetStore = StateTracker.StoreFactory.CreateStoreForObject(storeName);
-            TargetStore.Initialize();
-        }
-
-        /// <summary>
         /// Reads the data from the tracked properties and saves it to the data store for the tracked object.
         /// </summary>
         public void Persist()
         {
             if (TargetReference.IsAlive)
             {
+                if (TargetStore == null)
+                    TargetStore = InitStore();
+
                 foreach (string propertyName in TrackedProperties.Keys)
                 {
                     var value = TrackedProperties[propertyName].Getter(TargetReference.Target);
-
                     try
                     {
-                        value = OnPersistingState(propertyName, value);
-                        TargetStore.Set(value, propertyName);
-                    }
-                    catch (OperationCanceledException ex)
-                    {
-                        Trace.WriteLine(string.Format("Persisting cancelled, property key = '{0}', message='{1}'.", propertyName, ex.Message));
+                        var shouldPersist = OnPersistingState(propertyName, ref value);
+                        if (shouldPersist)
+                        {
+                            TargetStore.Set(value, propertyName);
+                        }
+                        else
+                        {
+                            Trace.WriteLine(string.Format("Persisting cancelled, key='{0}', property='{1}'.", Key, propertyName));
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -175,6 +172,9 @@ namespace Jot
         {
             if (TargetReference.IsAlive)
             {
+                if (TargetStore == null)
+                    TargetStore = InitStore();
+
                 foreach (string propertyName in TrackedProperties.Keys)
                 {
                     TrackedPropertyInfo descriptor = TrackedProperties[propertyName];
@@ -183,15 +183,20 @@ namespace Jot
                     {
                         try
                         {
-                            object storedValue = TargetStore.Get(propertyName);
-                            object valueToApply = OnApplyingState(propertyName, storedValue);
-                            descriptor.Setter(TargetReference.Target, valueToApply);
+                            object value = TargetStore.Get(propertyName);
+                            var shouldApply = OnApplyingState(propertyName, ref value);
+                            if (shouldApply)
+                            {
+                                descriptor.Setter(TargetReference.Target, value);
+                            }
+                            else
+                            {
+                                Trace.WriteLine(string.Format("Persisting cancelled, key='{0}', property='{1}'.", Key, propertyName));
+                            }
                         }
                         catch (Exception ex)
                         {
                             Trace.WriteLine(string.Format("TRACKING: Applying tracking to property with key='{0}' failed. ExceptionType:'{1}', message: '{2}'!", propertyName, ex.GetType().Name, ex.Message));
-                            if(descriptor.IsDefaultSpecified)
-                                descriptor.Setter(TargetReference.Target, descriptor.DefaultValue);
                         }
                     }
                     else if (descriptor.IsDefaultSpecified)
@@ -211,10 +216,16 @@ namespace Jot
         /// to what object. Otherwise, they will use the same data which is usually not what you want.
         /// </summary>
         /// <param name="key"></param>
+        /// <param name="storeNamingScheme"></param>
         /// <returns></returns>
-        public TrackingConfiguration IdentifyAs(string key)
+        public TrackingConfiguration IdentifyAs(string key, NamingScheme storeNamingScheme = NamingScheme.TypeNameAndKey)
         {
+            if (TargetStore != null)
+                throw new InvalidOperationException("Can't set key after TargetStore has been set (which happens the first time Apply() or Persist() is called).");
+
             Key = key;
+            StoreNamingScheme = storeNamingScheme;
+
             return this;
         }
 
@@ -376,6 +387,21 @@ namespace Jot
             else
                 membershipExpression = exp.Body as MemberExpression;
             return membershipExpression.Member.Name;
+        }
+
+        private IStore InitStore()
+        {
+            object target = TargetReference.Target;
+
+            //use the object type plus the key to identify the object store based on NamingScheme
+            string storeName;
+            switch (StoreNamingScheme)
+            {
+                case NamingScheme.KeyOnly: storeName = Key; break;
+                //default is reserved for NamingScheme.TypeNameAndKey
+                default: storeName = Key == null ? target.GetType().Name : string.Format("{0}_{1}", target.GetType().Name, Key); break;
+            }
+            return StateTracker.StoreFactory.CreateStoreForObject(storeName);
         }
 
         private TrackedPropertyInfo CreateDescriptor(string propertyName, bool isDefaultSpecifier, object defaultValue)
